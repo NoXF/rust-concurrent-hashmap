@@ -217,7 +217,7 @@ fn random_integer_lookup(hit_rate: f64, b: &mut Bencher, count: u32) {
             test::black_box(map.find(0, key));
         }
     );
-    b.bytes = n as u64 as u64;
+    b.bytes = n as u64 as u64 * 1000 * 1000;
 }
 
 fn random_string_lookup(hit_rate: f64, b: &mut Bencher, count: u32) {
@@ -234,7 +234,7 @@ fn random_string_lookup(hit_rate: f64, b: &mut Bencher, count: u32) {
             test::black_box(map.find(0, key));
         }
     );
-    b.bytes = count as u64 as u64;
+    b.bytes = count as u64 as u64 * 1000 * 1000;
 }
 
 #[bench]
@@ -287,5 +287,5 @@ fn random_integer_lookup_std(hit_rate: f64, b: &mut Bencher) {
             test::black_box(map.get(key));
         }
     );
-    b.bytes = n as u64 as u64;
+    b.bytes = n as u64 as u64 * 1000 * 1000;
 }
