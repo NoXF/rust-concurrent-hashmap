@@ -105,7 +105,7 @@ fn concurrent_ops_100_reads_64_threads(b: &mut Bencher) {
 
 fn bench(b: &mut Bencher, reads: f64, nthreads: u32) {
     b.iter(|| do_bench(reads, nthreads));
-    b.bytes = nthreads as u64 * OPS as u64;
+    b.bytes = nthreads as u64 * OPS as u64 * 1000 * 1000;
 }
 
 fn do_bench(reads: f64, nthreads: u32) {
