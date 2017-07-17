@@ -1,7 +1,7 @@
 use std::hash::{Hasher, Hash};
 use std::hash::BuildHasher;
 use std::collections::hash_map::RandomState;
-use spin::{Mutex, MutexGuard};
+use spin_bitwise::{RwLock, ReadLockGuard, WriteLockGuard};
 use std::default::Default;
 use std::mem::swap;
 use std::cmp::min;
@@ -20,11 +20,13 @@ use table::*;
 
 /// A concurrent hashmap using sharding
 pub struct ConcHashMap<K, V, H=RandomState> where K: Send + Sync, V: Send + Sync {
-    tables: Vec<Mutex<Table<K, V>>>,
+    tables: Vec<RwLock<Table<K, V>>>,
     hasher_factory: H,
     table_shift: u64,
     table_mask: u64,
 }
+
+const DEFAULT_READ_LOCK_ID: usize = 0;
 
 impl <K, V, H> ConcHashMap<K, V, H>
         where K: Hash + Eq + Send + Sync, V: Send + Sync, H: BuildHasher {
@@ -42,7 +44,7 @@ impl <K, V, H> ConcHashMap<K, V, H>
         let reserve = div_ceil(capacity, partitions);
         let mut tables = Vec::with_capacity(partitions);
         for _ in 0..partitions {
-            tables.push(Mutex::new(Table::new(reserve)));
+            tables.push(RwLock::new(Table::new(reserve)));
         }
         ConcHashMap {
             tables: tables,
@@ -75,7 +77,7 @@ impl <K, V, H> ConcHashMap<K, V, H>
             where K: Borrow<Q> + Hash + Eq + Send + Sync, Q: Hash + Eq + Sync {
         let hash = self.hash(key);
         let table_idx = self.table_for(hash);
-        let table = self.tables[table_idx].lock();
+        let table = self.tables[table_idx].read(DEFAULT_READ_LOCK_ID);
         match table.lookup(hash, |k| k.borrow() == key) {
             Some(idx) => Some(Accessor::new(table, idx)),
             None      => None
@@ -105,7 +107,7 @@ impl <K, V, H> ConcHashMap<K, V, H>
             where K: Borrow<Q> + Hash + Eq + Send + Sync, Q: Hash + Eq + Sync {
         let hash = self.hash(key);
         let table_idx = self.table_for(hash);
-        let table = self.tables[table_idx].lock();
+        let table = self.tables[table_idx].write();
         match table.lookup(hash, |k| k.borrow() == key) {
             Some(idx) => Some(MutAccessor::new(table, idx)),
             None      => None
@@ -118,7 +120,7 @@ impl <K, V, H> ConcHashMap<K, V, H>
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         let hash = self.hash(&key);
         let table_idx = self.table_for(hash);
-        let mut table = self.tables[table_idx].lock();
+        let mut table = self.tables[table_idx].write();
         table.put(key, value, hash, |old, mut new| { swap(old, &mut new); new })
     }
 
@@ -140,7 +142,7 @@ impl <K, V, H> ConcHashMap<K, V, H>
     pub fn upsert<U: Fn(&mut V)>(&self, key: K, value: V, updater: &U) {
         let hash = self.hash(&key);
         let table_idx = self.table_for(hash);
-        let mut table = self.tables[table_idx].lock();
+        let mut table = self.tables[table_idx].write();
         table.put(key, value, hash, |old, _| { updater(old); });
     }
 
@@ -151,7 +153,7 @@ impl <K, V, H> ConcHashMap<K, V, H>
             where K: Borrow<Q> + Hash + Eq + Send + Sync, Q: Hash + Eq + Sync {
         let hash = self.hash(key);
         let table_idx = self.table_for(hash);
-        let mut table = self.tables[table_idx].lock();
+        let mut table = self.tables[table_idx].write();
         table.remove(hash, |k| k.borrow() == key)
     }
 
@@ -214,7 +216,7 @@ impl <K, V, H> ConcHashMap<K, V, H> where K: Send + Sync, V: Send + Sync {
     pub fn iter<'a>(&'a self) -> Entries<'a, K, V, H> {
        Entries {
            map: self,
-           table: self.tables[0].lock(),
+           table: self.tables[0].read(DEFAULT_READ_LOCK_ID),
            table_idx: 0,
            bucket: 0
        }
@@ -226,7 +228,7 @@ impl <K, V, H> ConcHashMap<K, V, H> where K: Send + Sync, V: Send + Sync {
     /// at any point during or after the `.clear()` call.
     pub fn clear(&self) {
         for table in self.tables.iter() {
-            table.lock().clear();
+            table.write().clear();
         }
     }
 }
@@ -242,7 +244,7 @@ impl <K, V, H> Default for ConcHashMap<K, V, H>
 /// Iterator over the hashmap's mappings.
 pub struct Entries<'a, K, V, H> where K: 'a + Send + Sync, V: 'a + Send + Sync, H: 'a {
     map: &'a ConcHashMap<K, V, H>,
-    table: MutexGuard<'a, Table<K, V>>,
+    table: ReadLockGuard<'a, Table<K, V>>,
     table_idx: usize,
     bucket: usize,
 }
@@ -250,7 +252,7 @@ pub struct Entries<'a, K, V, H> where K: 'a + Send + Sync, V: 'a + Send + Sync, 
 impl <'a, K, V, H> Entries<'a, K, V, H> where K: Send + Sync, V: Send + Sync  {
     fn next_table(&mut self) {
         self.table_idx += 1;
-        self.table = self.map.tables[self.table_idx].lock();
+        self.table = self.map.tables[self.table_idx].read(DEFAULT_READ_LOCK_ID);
         self.bucket = 0;
     }
 }

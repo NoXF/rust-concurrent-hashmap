@@ -1,4 +1,5 @@
 extern crate spin;
+extern crate spin_bitwise;
 
 mod table;
 mod map;
