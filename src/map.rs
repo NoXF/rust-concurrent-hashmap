@@ -1,7 +1,7 @@
 use std::hash::{Hasher, Hash};
 use std::hash::BuildHasher;
 use std::collections::hash_map::RandomState;
-use spin_bitwise::{RwLock, ReadLockGuard, WriteLockGuard};
+use spin_bitwise::{RwLock, ReadLockGuard, WriteLockGuard, random_reader_idx, ARCH};
 use std::default::Default;
 use std::mem::swap;
 use std::cmp::min;
@@ -26,7 +26,11 @@ pub struct ConcHashMap<K, V, H=RandomState> where K: Send + Sync, V: Send + Sync
     table_mask: u64,
 }
 
-const DEFAULT_READ_LOCK_ID: usize = 0;
+pub use std::thread;
+
+//fn reader_id() -> usize {
+//    unsafe { thread::current().id().0 } as usize
+//}
 
 impl <K, V, H> ConcHashMap<K, V, H>
         where K: Hash + Eq + Send + Sync, V: Send + Sync, H: BuildHasher {
@@ -73,11 +77,11 @@ impl <K, V, H> ConcHashMap<K, V, H>
     /// # println!("workaround");
     /// ```
     #[inline(never)]
-    pub fn find<'a, Q: ?Sized>(&'a self, key: &Q) -> Option<Accessor<'a, K, V>>
+    pub fn find<'a, Q: ?Sized>(&'a self, reader_id: usize, key: &Q) -> Option<Accessor<'a, K, V>>
             where K: Borrow<Q> + Hash + Eq + Send + Sync, Q: Hash + Eq + Sync {
         let hash = self.hash(key);
         let table_idx = self.table_for(hash);
-        let table = self.tables[table_idx].read(DEFAULT_READ_LOCK_ID);
+        let table = self.tables[table_idx].read(reader_id);
         match table.lookup(hash, |k| k.borrow() == key) {
             Some(idx) => Some(Accessor::new(table, idx)),
             None      => None
@@ -103,13 +107,16 @@ impl <K, V, H> ConcHashMap<K, V, H>
     /// # println!("workaround");
     /// ```
     #[inline(never)]
-    pub fn find_mut<'a, Q: ?Sized>(&'a self, key: &Q) -> Option<MutAccessor<'a, K, V>>
+    pub fn find_mut<'a, Q: ?Sized>(&'a self, reader_id: usize, key: &Q) -> Option<MutAccessor<'a, K, V>>
             where K: Borrow<Q> + Hash + Eq + Send + Sync, Q: Hash + Eq + Sync {
         let hash = self.hash(key);
         let table_idx = self.table_for(hash);
-        let table = self.tables[table_idx].write();
+        let table = self.tables[table_idx].read(reader_id);
         match table.lookup(hash, |k| k.borrow() == key) {
-            Some(idx) => Some(MutAccessor::new(table, idx)),
+            Some(idx) => {
+                let table = self.tables[table_idx].write();
+                Some(MutAccessor::new(table, idx))
+            }
             None      => None
         }
     }
@@ -182,7 +189,7 @@ impl <K, V, H> Clone for ConcHashMap<K, V, H>
             hasher_factory: self.hasher_factory.clone(),
             concurrency: min(u16::MAX as usize, self.tables.len()) as u16
         });
-        for (k, v) in self.iter() {
+        for (k, v) in self.iter(0) {
             clone.insert(k.clone(), v.clone());
         }
         return clone;
@@ -213,10 +220,10 @@ impl <K, V, H> ConcHashMap<K, V, H> where K: Send + Sync, V: Send + Sync {
     /// the iteration may or may not be reflected.
     ///
     /// Iterating may block writers.
-    pub fn iter<'a>(&'a self) -> Entries<'a, K, V, H> {
+    pub fn iter<'a>(&'a self, reader_id: usize) -> Entries<'a, K, V, H> {
        Entries {
            map: self,
-           table: self.tables[0].read(DEFAULT_READ_LOCK_ID),
+           table: self.tables[0].read(reader_id),
            table_idx: 0,
            bucket: 0
        }
@@ -252,7 +259,7 @@ pub struct Entries<'a, K, V, H> where K: 'a + Send + Sync, V: 'a + Send + Sync, 
 impl <'a, K, V, H> Entries<'a, K, V, H> where K: Send + Sync, V: Send + Sync  {
     fn next_table(&mut self) {
         self.table_idx += 1;
-        self.table = self.map.tables[self.table_idx].read(DEFAULT_READ_LOCK_ID);
+        self.table = self.map.tables[self.table_idx].read(self.table.idx);
         self.bucket = 0;
     }
 }
@@ -379,23 +386,23 @@ mod test {
     #[test]
     fn insert_is_found() {
         let map: ConcHashMap<i32, i32> = Default::default();
-        assert!(map.find(&1).is_none());
+        assert!(map.find(0, &1).is_none());
         map.insert(1, 2);
-        assert_eq!(map.find(&1).unwrap().get(), &2);
-        assert!(map.find(&2).is_none());
+        assert_eq!(map.find(0, &1).unwrap().get(), &2);
+        assert!(map.find(0, &2).is_none());
         map.insert(2, 4);
-        assert_eq!(map.find(&2).unwrap().get(), &4);
+        assert_eq!(map.find(0, &2).unwrap().get(), &4);
     }
 
     #[test]
     fn insert_replace() {
         let map: ConcHashMap<i32, &'static str> = Default::default();
-        assert!(map.find(&1).is_none());
+        assert!(map.find(0, &1).is_none());
         map.insert(1, &"old");
-        assert_eq!(map.find(&1).unwrap().get(), &"old");
+        assert_eq!(map.find(0, &1).unwrap().get(), &"old");
         let old = map.insert(1, &"new");
         assert_eq!(Some("old"), old);
-        assert_eq!(map.find(&1).unwrap().get(), &"new");
+        assert_eq!(map.find(0, &1).unwrap().get(), &"new");
     }
 
     #[test]
@@ -410,7 +417,7 @@ mod test {
             if i % 2 == 0 {
                 find_assert(&map, &i, &(i * 2));
             } else {
-                assert!(map.find(&i).is_none());
+                assert!(map.find(0, &i).is_none());
             }
         }
     }
@@ -427,7 +434,7 @@ mod test {
             if i % 2 == 0 {
                 find_assert(&map, &i, &(i * 2));
             } else {
-                assert!(map.find(&i).is_none());
+                assert!(map.find(0, &i).is_none());
             }
         }
     }
@@ -435,7 +442,7 @@ mod test {
     #[test]
     fn find_none_on_empty() {
         let map: ConcHashMap<i32, i32> = Default::default();
-        assert!(map.find(&1).is_none());
+        assert!(map.find(0, &1).is_none());
     }
 
     #[test]
@@ -446,7 +453,7 @@ mod test {
         }
         let clone = orig.clone();
         for i in 0..100 {
-            assert_eq!(orig.find(&i).unwrap().get(), clone.find(&i).unwrap().get());
+            assert_eq!(orig.find(0, &i).unwrap().get(), clone.find(0, &i).unwrap().get());
         }
     }
 
@@ -458,7 +465,7 @@ mod test {
         }
         map.clear();
         for i in 0..100 {
-            assert!(map.find(&i).is_none());
+            assert!(map.find(0, &i).is_none());
         }
     }
 
@@ -469,9 +476,9 @@ mod test {
         map.insert(2, "two".to_string());
         map.insert(3, "three".to_string());
         assert_eq!(Some("two".to_string()), map.remove(&2));
-        assert_eq!("one", map.find(&1).unwrap().get());
-        assert!(map.find(&2).is_none());
-        assert_eq!("three", map.find(&3).unwrap().get());
+        assert_eq!("one", map.find(0, &1).unwrap().get());
+        assert!(map.find(0, &2).is_none());
+        assert_eq!("three", map.find(0, &3).unwrap().get());
     }
 
     #[test]
@@ -486,7 +493,7 @@ mod test {
             }
         }
         for i in 0..100 {
-            let x = map.find(&i);
+            let x = map.find(0, &i);
             if i % 2 == 0 {
                 assert!(x.is_none());
             } else {
@@ -512,7 +519,7 @@ mod test {
             }
         }
         for i in 0..100 {
-            let x = map.find(&i);
+            let x = map.find(0, &i);
             if i % 4 == 0 {
                 assert_eq!(&i.to_string(), x.unwrap().get());
             } else if i % 2 == 0 {
@@ -536,9 +543,9 @@ mod test {
     fn mut_modify() {
         let map: ConcHashMap<u32, u32> = Default::default();
         map.insert(1, 0);
-        let mut e = map.find_mut(&1).unwrap().get();
+        let mut e = map.find_mut(0, &1).unwrap().get();
         *e += 1;
-        assert_eq!(&1, map.find(&1).unwrap().get());
+        assert_eq!(&1, map.find(0, &1).unwrap().get());
     }
 
     #[test]
@@ -553,14 +560,14 @@ mod test {
         let tl_map = mmap.clone();
         let reader = thread::spawn(move || {
             for i in 0..range {
-                tl_map.find(&i).unwrap().get();
+                tl_map.find(0, &i).unwrap().get();
             }
         });
 
         let tl_map = mmap.clone();
         let writer = thread::spawn(move || {
             for i in 0..range {
-                let mut e = tl_map.find_mut(&i).unwrap().get();
+                let mut e = tl_map.find_mut(0, &i).unwrap().get();
                 *e += 1;
             }
         });
@@ -568,13 +575,13 @@ mod test {
         reader.join().unwrap();
         writer.join().unwrap();
         for i in 0..range {
-            assert_eq!(map.find(&i).unwrap().get(), &(i*i+1));
+            assert_eq!(map.find(0, &i).unwrap().get(), &(i*i+1));
         }
     }
 
     fn find_assert<K, V, H> (map: &ConcHashMap<K, V, H>, key: &K,  expected_val: &V)
             where K: Eq + Hash + Debug + Send + Sync, V: Eq + Debug + Send + Sync, H: BuildHasher {
-        match map.find(key) {
+        match map.find(0, key) {
             None    => panic!("missing key {:?} should map to {:?}", key, expected_val),
             Some(v) => assert_eq!(*v.get(), *expected_val)
         }

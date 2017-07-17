@@ -3,11 +3,14 @@
 extern crate test;
 extern crate rand;
 extern crate concurrent_hashmap;
+extern crate spin_bitwise;
+
 use std::thread;
 use std::sync::{Barrier, Arc};
-use test::Bencher;
+use test::{Bencher, black_box};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use concurrent_hashmap::*;
+use spin_bitwise::ARCH;
 
 const OPS: u32 = 10000;
 
@@ -105,7 +108,7 @@ fn concurrent_ops_100_reads_64_threads(b: &mut Bencher) {
 
 fn bench(b: &mut Bencher, reads: f64, nthreads: u32) {
     b.iter(|| do_bench(reads, nthreads));
-    b.bytes = nthreads as u64 * OPS as u64;
+    b.bytes = nthreads as u64 * OPS as u64 * 1000 * 1000;
 }
 
 fn do_bench(reads: f64, nthreads: u32) {
@@ -115,16 +118,16 @@ fn do_bench(reads: f64, nthreads: u32) {
     {
         let mut threads = Vec::new();
         let start_barrier = Arc::new(Barrier::new(nthreads));
-        for _ in 0..nthreads {
+        for thread_idx in 0..nthreads {
             let map = map.clone();
             let start_barrier = start_barrier.clone();
             threads.push(thread::spawn(move || {
                 let mut rng: XorShiftRng = SeedableRng::from_seed([1, 2, 3, 4]);
                 let mut read = 0;
                 start_barrier.wait();
-                for i in 0..OPS {
+                for i in 0..black_box(OPS) {
                     if rng.gen::<f64>() < reads {
-                        map.find(&i).map(|x| read += *x.get());
+                        map.find(thread_idx % ARCH.reader_cnt, &i).map(|x| read += *x.get());
                     } else {
                         map.insert(i, i * i);
                     }
