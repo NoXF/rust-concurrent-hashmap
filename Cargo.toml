@@ -13,7 +13,7 @@ default-features = false
 
 [dependencies.spin_bitwise]
 version = '0.1.0'
-path = "../spin_bitwise"
+git = "https://github.com/andreycizov/spin_bitwise_rs"
 
 [features]
 unstable = ["spin/asm"]
