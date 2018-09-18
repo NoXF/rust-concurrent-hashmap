@@ -8,12 +8,13 @@ documentation = "https://veddan.github.io/rustdoc/concurrent-hashmap/concurrent_
 description = "A concurrent hashmap library."
 
 [dependencies.spin]
-version = '0.4.9'
+branch = "spin_0.4.8"
+git = "https://github.com/NoXF/spin-rs"
 default-features = false
 
 [dependencies.spin_bitwise]
-version = '0.1.0'
-git = "https://github.com/andreycizov/spin_bitwise_rs"
+branch = "spin_0.4.8"
+git = "https://github.com/NoXF/spin_bitwise_rs.git"
 
 [features]
 unstable = ["spin/asm"]
